@@ -1,8 +1,8 @@
 # Duplicate review
 
-Version **2026-11-03.13**
+Version **2026-11-13.6**
 
-A Google Apps Script, bound to a private Google Sheet, that finds files you own in My Drive which Google Drive reports as byte-for-byte identical. It lists each pair with a full path. You review the pairs yourself. Nothing is moved to Trash until you confirm one file in a dialog.
+A Google Apps Script, bound to a private Google Sheet, that finds files you own in My Drive which Google Drive reports as byte-for-byte identical. It lists each pair with a full path. You review the pairs yourself. Choosing an Action records that choice. **Delete all selected actions** then checks each chosen row and moves the chosen file to Trash, with no dialog. If a check fails before Trash, that row stays and the reason is written in red at the end of the row. **Open confirmation for selected row** still asks before it trashes one file.
 
 The script is [DuplicateReview.gs](DuplicateReview.gs). Paste that whole file into the spreadsheet's Apps Script project. This README is the operating manual.
 
@@ -10,7 +10,7 @@ The script is [DuplicateReview.gs](DuplicateReview.gs). Paste that whole file in
 
 People accumulate the same video, archive, or photo in more than one folder: laptop backups, old Drive dumps, copies made by sync tools. The file names are often different. This script does not look at names. It groups files that Drive says have the same checksum and the same size, then shows you both paths so you can decide which copy to keep.
 
-It is a review tool. The scan only reads Drive. A delete is a separate, confirmed action, and it moves one file to Google Drive Trash. It does not permanently delete anything.
+It is a review tool. The scan only reads Drive. A delete is a separate action, and it moves the chosen file to Google Drive Trash. It does not permanently delete anything.
 
 ## What "identical" means
 
@@ -26,11 +26,11 @@ Google Docs, Google Sheets, and Google Slides have no binary checksum. They are 
 ## What the script never does
 
 - It never permanently deletes a file. There is no empty-Trash call and no Drive `delete` call.
-- The only Drive change it can make to your documents is `setTrashed(true)` for one file you confirmed, or `setTrashed(false)` to put that file back.
+- The only Drive change it can make to your documents is `setTrashed(true)` for a file you chose, or `setTrashed(false)` to put that file back.
 - It does not rename, move, or edit your documents during a scan.
 - It does not publish a web app. A link in an email cannot trash a file. There is no `doGet` or `doPost`.
-- It does not trash the last copy. Trash is allowed only when another file you own is still in Drive with the same size and the same MD5.
-- A copy on a Shared drive, or a copy you do not own, does not count as that spare.
+- **Open confirmation for selected row** does not trash the last copy. That path allows Trash only when another file you own is still in Drive with the same size and the same MD5. A copy on a Shared drive, or a copy you do not own, does not count as that spare.
+- **Delete all selected actions** applies that same spare-copy check, with no dialog and no confirmation. For each row whose Action is already filled in, it re-checks ownership, checksum, size, and that another file you own is still in Drive with the same size and the same MD5. If a check fails before Trash, it trashes neither file on that row and writes the reason in red in the **Issue** column at the end of the row. The Action stays. If the chosen file is already in Trash and a spare copy remains, it records that row and removes it, and it does not trash the other file. If no spare remains, it leaves the file in Trash and skips the row. It does not run while a scan is still going. It also skips a row whose hidden pair key does not match its two file ids, and it never trashes this spreadsheet.
 - It does not scan Shared drives.
 - It does not scan files you do not own.
 
@@ -112,7 +112,7 @@ Use the Google account that owns the files.
 6. If a later run says the Drive API is disabled: **Project Settings → Google Cloud Platform project**, then in Google Cloud open **APIs & Services → Library**, find **Drive API**, and enable it.
 7. Reload the spreadsheet so the **Duplicate review** menu appears.
 8. Choose **Duplicate review → Authorize and check setup**. The first click opens Google's permission screen and may not finish the check. Approve it, then run **Authorize and check setup** again. The result must say sharing and identity are OK. If it says the sheet is shared, stop and unshare it.
-9. Choose **Duplicate review → Install confirmation buttons**. This installs the trigger that opens the confirmation dialog when you use the Action column. Without it, choosing an action does nothing and nothing is trashed.
+9. Choose **Duplicate review → Install confirmation buttons**. This installs the trigger that opens the Restore dialog. Choosing an Action does not trash a file by itself. **Delete all selected actions** does not need this trigger. Restore on **TrashLog** does.
 10. Optional: **Duplicate review → Set minimum file size**. Then **Duplicate review → Scan My Drive for identical files**.
 
 Do not use the script editor's **Run** button for the scan or for dialogs. `getUi()` does not work there, so no dialog can appear. Use the spreadsheet menu. If you did run `authorize` from the editor, read the **Status** sheet, then reload the spreadsheet.
@@ -168,10 +168,11 @@ Open **Duplicates** only after **Phase** is **Done**.
 |---|---|
 | File 1 full path (earlier created time) | The older file. The cell is a link to that file id |
 | File 2 full path | One later identical copy. Also a link |
-| Action | Empty until you click it. Then it offers **Delete file 1** and **Delete file 2** |
+| Action | Empty until you choose **Delete file 1** or **Delete file 2**. The choice stays until that file is trashed, or until you clear the cell. A skipped row keeps the choice |
 | Size | A label such as `15 MB`. This column sorts alphabetically, not by real size |
 | Result | What last happened on this row |
 | MD5 | The checksum both files share |
+| Issue | Blank until a bulk delete skips the row. The reason is then written here in red. Read it: a refused check trashed neither file, and a note that says to check Drive Trash means a file may already be there |
 | File 1 ID, File 2 ID, Size bytes, Pair key | Hidden. The script needs them. Do not edit them |
 
 Click a path before you delete anything. The link opens that file id, not whatever file happens to sit at a similar path today. Path text was recorded when the path was built. If you moved the file afterward, the text can be stale and the link still opens the same file.
@@ -189,18 +190,33 @@ After **Phase** is **Done**:
 
 The sort uses the hidden byte size, keeps each pair on its own row, and keeps the path links. It does not read or change Drive. With tens of thousands of rows it can take a minute. It refuses to run before the scan is **Done**, so it cannot scramble a half-built report.
 
-## Moving one copy to Trash
+## Moving copies to Trash
 
 A cell cannot hold two real buttons. The Action cell is a dropdown.
 
-1. Click the **Action** cell on that row, not the header. Choose **Delete file 1** or **Delete file 2**.
-   Or select the row and choose **Duplicate review → Open confirmation for selected row**.
-2. A dialog opens. It names both files, both paths, the size, and the checksum. The Trash button stays disabled until you check the box.
-3. Check the box and press the button for the file you want in Trash.
+1. Click the **Action** cell on that row, not the header. Choose **Delete file 1** or **Delete file 2**. The choice stays in the cell. Nothing is trashed yet. You can fill in as many rows as you want, including by copying the choice down the column.
+2. Choose **Duplicate review → Delete all selected actions**.
 
-Until that button is pressed, nothing is trashed. Choosing the dropdown only opens the dialog. The script then clears the dropdown cell so the words do not sit there as if the delete already happened.
+That menu checks every chosen row, then moves the chosen file to Trash. It does not open a dialog and it does not ask you to confirm. For each selected row it reads Drive again and checks all of this:
 
-Before it trashes, the script checks all of this again on the server:
+- The chosen file is still yours and still has the same size and MD5 as the row. If it is not already in Trash, Drive must say it can be trashed.
+- Another file you own, with the same size and MD5, is still in Drive. The listed partner is checked first. If that partner is already gone, other indexed copies are checked. A Shared drive copy, or a copy you do not own, does not count.
+
+Immediately before Trash, the script reads the row again. If you changed the Action, the file ids, the size, or the MD5 while the check was running, it trashes nothing on that row and writes no Issue. A failed check does the same when the choice has changed, so the new choice is not blocked. It then reads the chosen file and the spare copy again. After Trash, the spare copy is read again. If it disappeared, the script puts the chosen file back.
+
+If the chosen file is already in Trash, the script does not trash the other file. When another file you own still has the same size and MD5, it records the row on **deleted duplicates** and **TrashLog** and removes it from **Duplicates**. When no spare copy remains, it leaves the file in Trash, skips the row, and does not restore it.
+
+If a check fails before Trash, neither file on that row is trashed. The row stays. The reason is written in red in **Issue**, at the end of the row, and the same text is written in **Result**. The Action stays, so you can see which file you had chosen. Nothing is permanently deleted. If the red text says to check Drive Trash, open Trash before you rely on the row. Clear an Action cell before you run the menu if that row should be left alone.
+
+A quota limit or a timeout is not written as a skip. That row is tried again when the run continues.
+
+It refuses to start while a scan is still running. It also skips a row, without calling Trash, when the hidden pair key does not match the two file ids, or when the chosen id is this spreadsheet. Those rows get the same red **Issue** text.
+
+A long list is done in batches of 40. When a batch finishes and rows are still selected, the script schedules the next batch about a minute later. It does not ask again. A row that already has **Issue** text is not retried by that continuation. Run **Delete all selected actions** again to check those rows once more. To stop a batch that has not started, clear the remaining Action cells.
+
+To trash one row with the checks below, select that row and choose **Duplicate review → Open confirmation for selected row**. A dialog names both files, both paths, the size, and the checksum. The Trash button stays disabled until you check the box. That path still refuses when it cannot prove another copy you own is in Drive with the same size and the same MD5.
+
+Before that one-row dialog trashes, the script checks all of this again on the server:
 
 - You are the owner of this private spreadsheet, and you are the person who clicked.
 - **Phase** is still **Done**. A scan in progress turns actions off. Starting a new scan cancels open confirmations.
@@ -216,14 +232,13 @@ The Trash call targets a file id, never the path text.
 ### After a successful Trash
 
 - The file is in Drive Trash. It is not permanently deleted. Google removes Trash on its own after about 30 days. This script does not.
-- The other file on that row stays in Drive.
 - The row leaves **Duplicates** and is appended to **deleted duplicates**.
-- The **Deleted** column names which side was moved, for example: `File 1 was moved to Trash, not permanently deleted: report.pdf. The other file on this row was left in Drive.`
+- The **Deleted** column names which side was moved. The one-row dialog also says the other file on that row was left in Drive.
 - **deleted duplicates** does not exist until the first successful Trash. Pasting the script does not create it.
 - **TrashLog** gets an audit row: when, file name, path, size, MD5, file id, and status **In Trash**.
-- Other rows that mentioned the same file, which happens in a group of three or more, stay on **Duplicates**. Their Result says that file is already in Trash. A later Trash on those rows still requires some identical copy to remain. The last copy is refused.
+- Other rows that mentioned the same file, which happens in a group of three or more, stay on **Duplicates**. Their Result says that file is already in Trash. Both **Open confirmation for selected row** and **Delete all selected actions** still require some identical copy to remain. If the chosen file is the last copy, that row is skipped, the other file is not trashed, and the reason is written in red in **Issue**. A chosen file that is already in Trash stays there when no spare remains.
 
-If you trash the earliest file in a group of three or more, the sheet does not redraw the remaining pairs. A later Trash still searches the indexed copies and will not take the last one. To see the new pairing, run a new scan after you have finished reviewing.
+If you trash the earliest file in a group of three or more, the sheet does not redraw the remaining pairs. A later check still searches the indexed copies and will not take the last one. To see the new pairing, run a new scan after you have finished reviewing.
 
 ## Undo
 
@@ -244,8 +259,9 @@ If the script trashed a file and then could not confirm the other copy, it tries
 | Set minimum file size | Stores the cutoff for the next scan. Does not change Drive |
 | Scan My Drive for identical files | Starts a new scan and a new index. Do not use this to continue a paused scan |
 | Resume scan now | Continues the saved scan, including some **ERROR** stops that were temporary |
-| Install confirmation buttons | Installs the edit trigger that opens the Trash and Restore dialogs |
-| Open confirmation for selected row | Same dialog as the Action dropdown, for the row you selected on **Duplicates** |
+| Install confirmation buttons | Installs the edit trigger for Restore on **TrashLog**. Action choices stay on the row either way |
+| Open confirmation for selected row | Dialog for the row you selected on **Duplicates**. Re-checks Drive, then Trash |
+| Delete all selected actions | Checks each chosen row with no dialog, then moves the chosen file to Trash. A check that fails before Trash writes the reason in red in **Issue** and trashes neither file. A file already in Trash is recorded and the row is removed only when a spare copy remains. Does not run during a scan. Continues until the remaining selected rows are done |
 | Sort duplicates, largest first | Reorders **Duplicates** by real byte size. Requires **Done** |
 | Sort duplicates, smallest first | Same, smallest first |
 | Authorize and check setup | Checks Drive API v3, privacy, and identity. Run this after granting permission |

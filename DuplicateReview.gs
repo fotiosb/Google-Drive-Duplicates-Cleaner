@@ -1,6 +1,6 @@
 /**
  * DuplicateReview.gs
- * Version 2026-11-03.13
+ * Version 2026-11-13.6
  *
  * Finds files you OWN in My Drive that Drive reports as byte-for-byte identical
  * (same md5Checksum AND same size) and lists each pair with a full path.
@@ -11,24 +11,39 @@
  *
  * SAFETY CONTRACT
  * - There is no permanent-delete call. The only Drive writes are
- *   setTrashed(true) once, and setTrashed(false) for an automatic rollback or
- *   for a restore of a file this script itself logged.
+ *   setTrashed(true) from the one-row dialog or from Delete all selected actions,
+ *   and setTrashed(false) for an automatic rollback or for a restore of a file
+ *   this script itself logged.
  * - There is no doGet/doPost and no web app. A link cannot trash a file.
  * - The scan does not trash, rename, or move your documents. It reads My Drive
  *   and writes this spreadsheet. It also creates and updates files in a folder
  *   it owns named "Duplicate review index (script data)". That folder is working
  *   data, not a copy of your documents. Do not delete it until Status says
  *   Done or ERROR.
- * - Choosing an Action only opens a dialog, and only after a scan has finished.
- *   Starting another scan turns those actions off and cancels open confirmations.
- *   The dialog button stays disabled until a box is checked. That box stops
- *   misclicks. It is not what stops a different person. The server refuses
- *   unless this spreadsheet is private, you own it, the report is from a
- *   finished scan, and another file you own is still in Drive with the same
- *   size and the same MD5.
- * - Immediately before Trash, both files are read again from Drive. After the
- *   Trash call, the surviving copy is read again. If it is gone, the script
- *   puts the just-trashed file back.
+ * - Choosing Delete file 1 or Delete file 2 only records that choice on the row.
+ *   It does not trash anything. Starting another scan clears those choices and
+ *   cancels open one-row confirmations.
+ * - Duplicate review → Delete all selected actions moves every chosen file to
+ *   Trash. It does not open a dialog and it does not ask for confirmation.
+ *   For each selected row it re-checks ownership, checksum, size, and that
+ *   another file you own is still in Drive with the same size and the same
+ *   MD5. If a check fails before Trash, it trashes neither file on that row
+ *   and writes the reason in red in the Issue column at the end of the row.
+ *   The Action stays. If the chosen file is already in Trash and a spare copy
+ *   you own still matches, the other file is not trashed: the row is recorded
+ *   and removed. If no spare remains, the file stays in Trash and the row is
+ *   skipped. A continuation does not retry a row that already has an Issue.
+ *   Run the menu again to check those rows once more. It still only calls
+ *   setTrashed(true) for a file that is not already in Trash. It does not run
+ *   while a scan is in progress. It skips a row whose hidden pair key does
+ *   not match the two file ids, and it never trashes this spreadsheet.
+ * - Duplicate review → Open confirmation for selected row still opens a dialog
+ *   for one row. That button stays disabled until a box is checked. The server
+ *   refuses that path unless this spreadsheet is private, you own it, the report
+ *   is from a finished scan, and another file you own is still in Drive with the
+ *   same size and the same MD5. Immediately before that Trash, both files are
+ *   read again. After it, the surviving copy is read again. If it is gone, the
+ *   script puts the just-trashed file back.
  * - Trash targets a file id, never path text.
  *
  * SETUP (use the Google account that owns the files)
@@ -92,16 +107,31 @@
  *    The MD5 column is the checksum. Same MD5 and same size are what "identical"
  *    means here. The same file name is not enough.
  * 11. A sheet cell cannot hold two real buttons. The Action cell is a dropdown.
- *     Choosing "Delete file 1" or "Delete file 2" only opens a dialog that
- *     contains both buttons. You can also select the row and use
- *     Duplicate review → Open confirmation for selected row.
- *     If the dropdown does nothing, the confirmation trigger is not installed
- *     or the scan has not finished. Nothing is trashed until you check the box
- *     and press the dialog button. Delete actions do not work while a scan is
+ *     Choosing "Delete file 1" or "Delete file 2" records that choice and leaves
+ *     it in the cell. Nothing is trashed yet.
+ *     Duplicate review → Delete all selected actions then checks every chosen
+ *     row and moves the chosen file to Trash. It does not ask again. It
+ *     re-checks ownership, checksum, size, and that another copy remains.
+ *     If a check fails before Trash, neither file on that row is trashed.
+ *     The reason is written in red in the Issue column at the end of the row.
+ *     The Action stays. A chosen file that is already in Trash is recorded
+ *     and the row is removed only when a spare copy remains. Otherwise it
+ *     stays in Trash and the row is skipped. It does not run while a scan
+ *     is in progress. A row is also skipped when its pair key does not match
+ *     its file ids, or when it points at this spreadsheet.
+ *     A long list pauses and continues by itself. A continuation skips a row
+ *     that already has an Issue. Run the menu again to check those rows once
+ *     more. Clear an Action cell to leave that row out. Clear the remaining
+ *     Action cells to stop a continuation that has not run yet.
+ *     You can still select one row and use
+ *     Duplicate review → Open confirmation for selected row. That path still
+ *     opens a dialog, and nothing on that row is trashed until you check the
+ *     box and press the button. One-row delete does not work while a scan is
  *     running, and an old dialog stops working once a new scan starts.
  *     After a file is actually in Trash, that row leaves Duplicates and is
  *     appended to the sheet "deleted duplicates", with a Deleted cell naming
- *     the file that was moved. The other file on the row stays in Drive.
+ *     the file that was moved. The other file on that same row is not chosen
+ *     by that row. Another row can still name it.
  * 12. To undo: TrashLog → Restore this file. This only restores a file this
  *     script trashed, and only if size and MD5 still match the log. You can
  *     also restore from drive.google.com/drive/trash.
@@ -116,17 +146,20 @@
  * larger than 500 files (summary row, no Delete action). A copy on a Shared
  * drive, or a copy you do not own, is not a spare. Trash is allowed only when
  * another file you own is still in Drive with the same size and the same MD5.
+ * Delete all selected actions applies that rule with no dialog. If the chosen
+ * file is the last copy, that row is skipped and the other file is not trashed.
+ * A chosen file that is already in Trash stays there when no spare remains.
  * The scan does not stop at a file count. If the duplicate groups themselves
  * cannot fit in this spreadsheet, the scan still finishes and Status says the
  * interactive report was shortened; raise the minimum size and scan again to
  * narrow it. Nothing is trashed by that shortening. If you trash the earliest
- * copy in a group of three or more, the sheet may not show the new pairing,
- * but a later Trash still searches the indexed copies and refuses to trash
- * the last copy.
+ * copy in a group of three or more, the sheet may not show the new pairing.
+ * A later check still searches the indexed copies and refuses to trash the
+ * last copy. The skipped row stays, with the reason in red in Issue.
  */
 'use strict';
 
-var SCRIPT_VERSION = '2026-11-03.13';
+var SCRIPT_VERSION = '2026-11-13.6';
 
 /** Stop a chunk before Apps Script's 6-minute hard kill. */
 var RUN_BUDGET_MS = 5 * 60 * 1000;
@@ -152,6 +185,12 @@ var MAX_GROUP = 500;
 
 /** How many other indexed copies to read when the listed partner is already gone. */
 var SIBLING_PROBE_LIMIT = 500;
+
+/**
+ * Selected-action Trash calls in one execution. The rest of the budget is kept
+ * for writing the log and removing those rows before Apps Script is killed.
+ */
+var SELECTED_DELETE_BATCH = 40;
 
 /**
  * Records kept in one Drive shard file. This is not a scan cap.
@@ -196,6 +235,8 @@ var DUP_ID2 = 7;
 var DUP_SIZE = 8;
 var DUP_MD5 = 9;
 var DUP_PAIR = 10;
+/** Red skip note. Not part of DUP_COLS, so archive rows and id locks stay put. */
+var DUP_ISSUE = 11;
 
 var PROTECT_TAG = 'DuplicateReview';
 
@@ -205,6 +246,120 @@ var PROTECT_TAG = 'DuplicateReview';
 
 function isFileId(value) {
   return /^[a-zA-Z0-9_-]{10,80}$/.test(String(value || ''));
+}
+
+/** 1, 2, or 0. Trims the label only. File ids are never trimmed. */
+function chosenDeleteSide(action) {
+  var choice = String(action == null ? '' : action).replace(/^\u200B/, '').trim();
+  if (choice === 'Delete file 1') return 1;
+  if (choice === 'Delete file 2') return 2;
+  return 0;
+}
+
+/**
+ * Decides whether a Duplicates row is safe to hand to Trash.
+ * No Drive calls. A summary row, a broken id, or this spreadsheet is refused.
+ * @return {{ok:boolean, selected:boolean, which:number, targetId:string, id1:string, id2:string, message:string}}
+ */
+function selectedTrashTarget(action, id1, id2, pairKey, spreadsheetId) {
+  var which = chosenDeleteSide(action);
+  if (!which) return { ok: false, selected: false, which: 0, targetId: '', id1: '', id2: '', message: '' };
+  id1 = String(id1 == null ? '' : id1);
+  id2 = String(id2 == null ? '' : id2);
+  var targetId = which === 1 ? id1 : id2;
+  if (!isFileId(id1) || !isFileId(id2) || id1 === id2) {
+    return {
+      ok: false, selected: true, which: which, targetId: '', id1: id1, id2: id2,
+      message: 'Nothing was moved to Trash. This row does not list two different file ids.'
+    };
+  }
+  if (String(pairKey == null ? '' : pairKey) !== id1 + '|' + id2) {
+    return {
+      ok: false, selected: true, which: which, targetId: '', id1: id1, id2: id2,
+      message: 'Nothing was moved to Trash. The hidden pair key does not match the file ids on this row.'
+    };
+  }
+  if (spreadsheetId && targetId === String(spreadsheetId)) {
+    return {
+      ok: false, selected: true, which: which, targetId: '', id1: id1, id2: id2,
+      message: 'Nothing was moved to Trash. This row points at the spreadsheet itself.'
+    };
+  }
+  return { ok: true, selected: true, which: which, targetId: targetId, id1: id1, id2: id2, message: '' };
+}
+
+/**
+ * New last report row after `removed` data rows were deleted.
+ * Rows below the report (notes, blank padding) must not become part of the report.
+ */
+function nextDupEnd(storedRaw, lastAfterDelete, removed) {
+  var stored = Number(storedRaw);
+  var last = Number(lastAfterDelete);
+  var gone = Number(removed) || 0;
+  if (!isFinite(last) || last < 0) last = 0;
+  if (!isFinite(gone) || gone < 0) gone = 0;
+  var previous;
+  if (isFinite(stored) && stored >= 1 && stored <= last + gone) previous = stored;
+  else previous = last + gone;
+  var nextEnd = previous - gone;
+  if (nextEnd > last) nextEnd = last;
+  if (nextEnd < 1) nextEnd = 1;
+  return nextEnd;
+}
+
+/**
+ * Result text for a row that still names a file this batch already trashed.
+ * Returns '' when the cell should be left alone. No Drive calls.
+ */
+function partnerTrashNote(file1Hit, file2Hit, name1, name2, existingResult) {
+  if (!file1Hit && !file2Hit) return '';
+  var existing = String(existingResult == null ? '' : existingResult).replace(/^\u200B/, '');
+  if (existing.indexOf('Could not move to Trash') === 0 || existing.indexOf('Nothing was moved to Trash') === 0) return '';
+  if (existing.indexOf('Neither file was moved to Trash') === 0) return '';
+  if (existing.indexOf('Check Drive Trash') !== -1) return '';
+  if (existing.indexOf('was not restored') !== -1) return '';
+  if (existing.indexOf('Nothing further was changed') !== -1) return '';
+  if (existing.indexOf('The other file was not trashed') !== -1) return '';
+  if (existing.indexOf('putting the file back failed') !== -1) return '';
+  if (existing.indexOf('Restore it from Drive Trash') !== -1) return '';
+  if (existing.indexOf('left Trash') !== -1) return '';
+  if (existing.indexOf('The file was moved to Trash, but this row could not be removed') === 0) return '';
+  if (existing.indexOf('The file is in Trash, but this row could not be removed') === 0) return '';
+  var label1 = name1 || 'file 1';
+  var label2 = name2 || 'file 2';
+  if (file1Hit && file2Hit) {
+    return 'File 1 (' + label1 + ') and File 2 (' + label2 + ') are already in Trash from another row. They were not permanently deleted.';
+  }
+  if (file1Hit) return 'File 1 is already in Trash from another row (' + label1 + '). It was not permanently deleted.';
+  return 'File 2 is already in Trash from another row (' + label2 + '). It was not permanently deleted.';
+}
+
+/**
+ * Sentence written on a skipped bulk-delete row.
+ * Danger cases keep their own wording, because one file may already be in Trash.
+ */
+function bulkSkipMessage(detail) {
+  var text = String(detail == null ? '' : detail).replace(/^\u200B/, '').trim();
+  if (!text) text = 'The row could not be checked.';
+  if (text.indexOf('Neither file was moved to Trash') === 0) return text;
+  // These sentences are about a file that may already be in Trash.
+  // Prefixing "Neither file was moved" would hide that.
+  if (text.indexOf('Check Drive Trash') !== -1) return text;
+  if (text.indexOf('already in Trash') !== -1) return text;
+  if (text.indexOf('was not restored') !== -1) return text;
+  if (text.indexOf('left Trash') !== -1) return text;
+  if (text.indexOf('putting the file back failed') !== -1) return text;
+  if (text.indexOf('Restore it from Drive Trash') !== -1) return text;
+  if (text.indexOf('Nothing was moved to Trash.') === 0) {
+    text = text.slice('Nothing was moved to Trash.'.length).trim();
+    if (!text) return 'Neither file was moved to Trash.';
+  }
+  return 'Neither file was moved to Trash. ' + text;
+}
+
+/** True when the Issue cell already records a skip. Blank and whitespace do not count. */
+function issueTextPresent(value) {
+  return String(value == null ? '' : value).replace(/^\u200B/, '').trim() !== '';
 }
 
 function isMd5(value) {
@@ -645,6 +800,7 @@ function onOpen() {
     .addSeparator()
     .addItem('Install confirmation buttons', 'installActionTrigger')
     .addItem('Open confirmation for selected row', 'openConfirmationForSelection')
+    .addItem('Delete all selected actions', 'deleteSelectedActions')
     .addSeparator()
     .addItem('Sort duplicates, largest first', 'sortDuplicatesLargestFirst')
     .addItem('Sort duplicates, smallest first', 'sortDuplicatesSmallestFirst')
@@ -678,7 +834,8 @@ function sortDuplicatesBySize(largestFirst) {
     return;
   }
   var count = last - 1;
-  var values = sheet.getRange(2, 1, count, DUP_COLS).getValues();
+  var width = sheet.getMaxColumns() >= DUP_ISSUE ? DUP_ISSUE : DUP_COLS;
+  var values = sheet.getRange(2, 1, count, width).getValues();
   var rich1 = null;
   var rich2 = null;
   try {
@@ -708,11 +865,18 @@ function sortDuplicatesBySize(largestFirst) {
     var filter = sheet.getFilter();
     if (filter) filter.remove();
   } catch (ignore) {}
-  var range = sheet.getRange(2, 1, count, DUP_COLS);
+  var range = sheet.getRange(2, 1, count, width);
   range.setNumberFormat('@');
   range.setValues(sorted);
   if (out1.length) sheet.getRange(2, 1, count, 1).setRichTextValues(out1);
   if (out2.length) sheet.getRange(2, 2, count, 1).setRichTextValues(out2);
+  if (width >= DUP_ISSUE) {
+    var colors = [];
+    for (var c = 0; c < sorted.length; c++) {
+      colors.push([issueTextPresent(sorted[c][DUP_ISSUE - 1]) ? '#ff0000' : '#000000']);
+    }
+    try { sheet.getRange(2, DUP_ISSUE, count, 1).setFontColors(colors); } catch (ignoreColor) {}
+  }
   protectRange(sheet.getRange(2, DUP_ID1, count, 3));
   protectRange(sheet.getRange(2, DUP_PAIR, count, 1));
   try {
@@ -756,10 +920,12 @@ function showSafety() {
   SpreadsheetApp.getUi().alert(
     'How this stays safe',
     'The scan only reads Drive. It does not change files.\n\n' +
-      'Delete file 1 / Delete file 2 open a confirmation dialog. The file is not touched until you check the box and press the button in that dialog.\n\n' +
-      'The button moves YOUR copy to Trash. It does not permanently delete. Emptying Trash, or Google removing Trash after about 30 days, is permanent. This script never does that.\n\n' +
-      'The script refuses if this spreadsheet is shared, or if it cannot prove another file you own is still in Drive with the same size and the same MD5 checksum. A Shared drive copy does not count.\n\n' +
-      'Delete actions do not work while a scan is running.\n\n' +
+      'Delete file 1 / Delete file 2 record the choice on that row. The file is not touched yet.\n\n' +
+      'Delete all selected actions then checks every chosen row and moves the chosen file to Trash. It does not ask again. It re-checks ownership, checksum, size, and that another copy you own is still in Drive. If a check fails before Trash, neither file on that row is trashed, and the reason is written in red in the Issue column. If the chosen file is already in Trash and a spare copy remains, the row is recorded and removed without trashing the other file. If the red note says to check Drive Trash, a file may already be there. It does not run while a scan is still going. A row is also skipped when its file ids do not match the hidden pair key, or when the row points at this spreadsheet.\n\n' +
+      'Open confirmation for selected row still opens a dialog for one row. That file is not touched until you check the box and press the button.\n\n' +
+      'Either action moves the copy to Trash. It does not permanently delete. Emptying Trash, or Google removing Trash after about 30 days, is permanent. This script never does that.\n\n' +
+      'The one-row dialog refuses if this spreadsheet is shared, or if it cannot prove another file you own is still in Drive with the same size and the same MD5 checksum. A Shared drive copy does not count. Delete all selected actions applies that same ownership, checksum, size, and spare-copy rule, with no dialog. Read the red Issue text on a skipped row.\n\n' +
+      'The one-row dialog does not work while a scan is running.\n\n' +
       'Identical means Drive reports the same checksum and size. The script does not download the files.\n\n' +
       'Google Docs, Sheets, and Slides are skipped. They have no binary checksum.\n' +
       'Shared drives are not scanned. Empty (0-byte) files are skipped.\n' +
@@ -852,9 +1018,10 @@ function installActionTrigger() {
   ScriptApp.newTrigger('handleEdit').forSpreadsheet(spreadsheet).onEdit().create();
   SpreadsheetApp.getUi().alert(
     'Confirmation buttons installed',
-    'Choosing Delete file 1 or Delete file 2 opens a dialog.\n\n' +
-      'Nothing is moved to Trash until you check the box and press the button in that dialog.\n\n' +
-      'If the dropdown does nothing, select the row and use Duplicate review → Open confirmation for selected row.\n\n' +
+    'Choosing Delete file 1 or Delete file 2 keeps that choice on the row. Nothing is trashed yet.\n\n' +
+      'Duplicate review → Delete all selected actions checks each chosen row, with no dialog, then moves the chosen file to Trash. A check that fails before Trash leaves both files in place and writes the reason in red in the Issue column. Read that note: it also says when a file may already be in Trash.\n\n' +
+      'Open confirmation for selected row still asks before it trashes one row.\n\n' +
+      'Restore on the Trash log still needs this trigger.\n\n' +
       'Run Authorize and check setup once. It must say sharing / identity is OK.',
     SpreadsheetApp.getUi().ButtonSet.OK
   );
@@ -2323,7 +2490,8 @@ function ensureDuplicateHeader() {
     'File 2 ID',
     'Size bytes',
     'MD5',
-    'Pair key'
+    'Pair key',
+    'Issue'
   ];
   var sheet = resetSheet(SHEET_DUPLICATES, headers);
   sheet.setColumnWidth(1, 460);
@@ -2333,10 +2501,12 @@ function ensureDuplicateHeader() {
   sheet.setColumnWidth(5, 420);
   sheet.setColumnWidth(DUP_MD5, 280);
   sheet.getRange(1, DUP_ACTION).setNote(
-    'Choosing Delete file 1 or Delete file 2 only opens a confirmation dialog. ' +
-      'Nothing is permanently deleted. A file is moved to Trash only if another identical copy still exists.'
+    'Choosing Delete file 1 or Delete file 2 records the choice. It does not trash the file. ' +
+      'Duplicate review → Delete all selected actions checks Drive again with no dialog, then moves the chosen file to Trash. ' +
+      'If a check fails before Trash, neither file is trashed and the reason is written in red in Issue. Nothing is permanently deleted.'
   );
   sheet.getRange(1, 1, 1, DUP_MD5).setBackground('#f5f5f4').setFontWeight('bold');
+  ensureIssueColumn(sheet);
   store.setProperty('REPORT_RESET', '1');
   store.setProperty('DUP_ROWS', '1');
   store.setProperty('DUP_GROUPS', '0');
@@ -2351,7 +2521,7 @@ function reportRowForPair(pair) {
     sheetText(file2.path || file2.name),
     '',
     formatBytes(file1.size),
-    'Not touched. Path text is from the scan. Open both links. The confirmation dialog reads Drive again before Trash.',
+    'Not touched. Choose Delete file 1 or Delete file 2. Delete all selected actions checks Drive again and does not ask. A problem is written in red in Issue.',
     sheetExact(file1.id),
     sheetExact(file2.id),
     sheetExact(file1.size),
@@ -2494,6 +2664,27 @@ function duplicateRowCount() {
   return last;
 }
 
+/** Scan phases that own the Duplicates sheet between chunks. Empty when idle. */
+function activeScanPhase() {
+  var phase = props().getProperty('PHASE') || '';
+  if (phase === 'LIST_FILES' || phase === 'LIST_FOLDERS' || phase === 'SPLIT' || phase === 'FLUSH_TAIL' ||
+      phase === 'COLLECT' || phase === 'BUILD_PATHS' || phase === 'BUILD_REPORT' || phase === 'DEDUPE' ||
+      phase === 'FORMAT') return phase;
+  return '';
+}
+
+/**
+ * Stores the report boundary after `removed` data rows were deleted.
+ * Rows below the old report stay outside it.
+ */
+function rememberDupEnd(sheet, removed) {
+  var stored = Number(props().getProperty('DUP_ROWS') || '0');
+  var last = sheet.getLastRow();
+  var nextEnd = nextDupEnd(stored, last, removed);
+  props().setProperty('DUP_ROWS', String(nextEnd));
+  return nextEnd;
+}
+
 function formatStep() {
   var store = props();
   var sheet = getOrCreateSheet(SHEET_DUPLICATES);
@@ -2560,7 +2751,7 @@ function finalizeDuplicates(sheet, rowCount) {
   }
   sheet.setFrozenRows(1);
   writeStatusField('Phase', 'Done');
-  writeStatusField('Result', 'Review the Duplicates sheet. Open both file links before using Action. Nothing has been trashed by the scan.');
+  writeStatusField('Result', 'Review the Duplicates sheet. Choose an Action, then use Delete all selected actions. Nothing has been trashed by the scan.');
   try {
     var filter = sheet.getFilter();
     if (filter) filter.remove();
@@ -2627,19 +2818,7 @@ function handleEdit(event) {
     var sheet = range.getSheet();
     if (range.getRow() === 1 && range.getNumRows() === 1) return;
     if (sheet.getName() === SHEET_DUPLICATES && rangeIntersectsColumn(range, DUP_ACTION)) {
-      if (range.getNumRows() !== 1 || range.getNumColumns() !== 1 || range.getColumn() !== DUP_ACTION) {
-        clearColumnCells(range, DUP_ACTION);
-        SpreadsheetApp.getUi().alert('For safety, change one Action cell at a time. Nothing was deleted.');
-        return;
-      }
-      var value = String(event.value || range.getValue() || '');
-      if (value !== 'Delete file 1' && value !== 'Delete file 2') return;
-      range.clearContent();
-      if (!reportIsCurrent()) {
-        noteRowFailure(SHEET_DUPLICATES, range.getRow(), new Error('Refused. The duplicate report is not from a finished scan. Nothing was deleted.'));
-        return;
-      }
-      openConfirmationForRow(range.getRow());
+      // The choice stays in the cell. Delete all selected actions performs it.
       return;
     }
     if (sheet.getName() === SHEET_LOG && rangeIntersectsColumn(range, 9)) {
@@ -2722,8 +2901,11 @@ function livePath(meta, cache) {
   return buildFilePaths(parents, meta.name, folders, rootId, rootName);
 }
 
-function sameOwnedBytes(meta, md5, sizeRaw) {
-  if (!meta || meta.trashed === true || meta.ownedByMe !== true) return false;
+function sameOwnedBytes(meta, md5, sizeRaw, allowTrashed) {
+  // allowTrashed is only for recognizing a chosen file that is already in Trash.
+  // A spare copy must still be in Drive, so callers omit it.
+  if (!meta || meta.ownedByMe !== true) return false;
+  if (!allowTrashed && meta.trashed === true) return false;
   if (String(meta.mimeType || '').indexOf('application/vnd.google-apps.') === 0) return false;
   var liveMd5 = String(meta.md5Checksum || '').toLowerCase();
   if (!isMd5(liveMd5) || liveMd5 !== String(md5 || '').toLowerCase()) return false;
@@ -2743,13 +2925,14 @@ function sheetStillListsPair(id1, id2) {
 }
 
 /**
- * @return {{ok:boolean, message:string, plan:Object|null}}
- * No Drive writes.
+ * @return {{ok:boolean, alreadyTrashed:boolean, message:string, plan:Object|null}}
+ * No Drive writes. assumeListed skips the full-sheet scan. The one-row dialog
+ * omits it and still checks that the pair is on the report.
  */
-function evaluateTarget(record, which, liveCache) {
+function evaluateTarget(record, which, liveCache, assumeListed) {
   var targetId = which === 1 ? record.id1 : record.id2;
   var partnerId = which === 1 ? record.id2 : record.id1;
-  if (!sheetStillListsPair(record.id1, record.id2)) {
+  if (!assumeListed && !sheetStillListsPair(record.id1, record.id2)) {
     return { ok: false, message: 'This pair is no longer on the report. Nothing was deleted.', plan: null };
   }
   var target;
@@ -2757,10 +2940,16 @@ function evaluateTarget(record, which, liveCache) {
     target = liveCache[targetId] || readLiveFile(targetId);
     liveCache[targetId] = target;
   } catch (err) {
-    return { ok: false, message: 'Could not read the file from Drive. Nothing was deleted. ' + err.message, plan: null };
+    if (isTransientError(err)) throw err;
+    return { ok: false, message: 'Could not read the file from Drive. Nothing was deleted. ' + (err && err.message ? err.message : err), plan: null };
   }
   if (target.trashed === true) {
-    return { ok: false, message: 'That copy is already in Trash. Nothing further was changed.', plan: null };
+    return {
+      ok: false,
+      alreadyTrashed: true,
+      message: 'That copy is already in Trash. Nothing further was changed.',
+      plan: null
+    };
   }
   if (!sameOwnedBytes(target, record.md5, record.sizeRaw)) {
     return { ok: false, message: 'Refused. The file no longer matches the checksum and size from the scan, or you do not own it. Nothing was deleted.', plan: null };
@@ -2789,6 +2978,69 @@ function evaluateTarget(record, which, liveCache) {
   };
 }
 
+/**
+ * Same Drive facts as the one-row dialog, with no dialog and no Drive writes.
+ * A transient read is not a permanent skip. The caller retries that row later.
+ * @return {{ok:boolean, transient:boolean, alreadyTrashed:boolean, message:string, targetName:string, siblingId:string}}
+ */
+function prepareOwnedTrash(record, which, liveCache, assumeListed) {
+  var empty = { ok: false, transient: false, alreadyTrashed: false, message: '', targetName: '', siblingId: '' };
+  var verdict;
+  try {
+    verdict = evaluateTarget(record, which, liveCache, assumeListed);
+  } catch (err) {
+    empty.transient = isTransientError(err);
+    empty.message = err && err.message ? err.message : String(err);
+    return empty;
+  }
+  if (!verdict.ok) {
+    empty.transient = isTransientError({ message: verdict.message });
+    empty.alreadyTrashed = verdict.alreadyTrashed === true;
+    empty.message = verdict.message;
+    var seenId = which === 1 ? record.id1 : record.id2;
+    if (empty.alreadyTrashed && liveCache[seenId] && liveCache[seenId].name) {
+      empty.targetName = String(liveCache[seenId].name);
+    }
+    return empty;
+  }
+  try {
+    var targetNow = readLiveFile(verdict.plan.targetId);
+    liveCache[verdict.plan.targetId] = targetNow;
+    if (targetNow.trashed === true) {
+      empty.alreadyTrashed = true;
+      empty.message = 'That copy is already in Trash. Nothing further was changed.';
+      empty.targetName = String(targetNow.name || '');
+      return empty;
+    }
+    if (!sameOwnedBytes(targetNow, record.md5, record.sizeRaw)) {
+      empty.message = 'Refused. The chosen file changed at the last moment. Nothing was deleted.';
+      return empty;
+    }
+    if (targetNow.capabilities && targetNow.capabilities.canTrash === false) {
+      empty.message = 'Refused. Drive says this file cannot be trashed. Nothing was deleted.';
+      return empty;
+    }
+    var siblingNow = readLiveFile(verdict.plan.partnerId);
+    liveCache[verdict.plan.partnerId] = siblingNow;
+    if (!siblingNow || siblingNow.id === verdict.plan.targetId || !sameOwnedBytes(siblingNow, record.md5, record.sizeRaw)) {
+      empty.message = 'Refused. The other copy changed at the last moment. Nothing was deleted.';
+      return empty;
+    }
+    return {
+      ok: true,
+      transient: false,
+      alreadyTrashed: false,
+      message: '',
+      targetName: String(targetNow.name || ''),
+      siblingId: siblingNow.id
+    };
+  } catch (err) {
+    empty.transient = isTransientError(err);
+    empty.message = 'Could not read the file from Drive. Nothing was deleted. ' + (err && err.message ? err.message : err);
+    return empty;
+  }
+}
+
 function findLiveSibling(record, targetId, partnerId, liveCache) {
   var partner = considerLive(partnerId, record, targetId, liveCache);
   if (partner) return partner;
@@ -2810,8 +3062,88 @@ function considerLive(fileId, record, targetId, liveCache) {
     var meta = liveCache[fileId] || readLiveFile(fileId);
     liveCache[fileId] = meta;
     if (sameOwnedBytes(meta, record.md5, record.sizeRaw)) return meta;
-  } catch (ignore) {}
+  } catch (err) {
+    // A quota or timeout must not look like "no spare copy".
+    if (isTransientError(err)) throw err;
+  }
   return null;
+}
+
+/**
+ * The chosen file is already in Trash. Finish the row only when it still
+ * matches the scan and a spare copy is still in Drive. Does not trash and
+ * does not restore. A transient read is retried later with no Issue.
+ * @return {{ok:boolean, transient:boolean, retry:boolean, message:string, targetName:string}}
+ */
+function confirmAlreadyTrashed(record, which) {
+  var targetId = which === 1 ? record.id1 : record.id2;
+  var partnerId = which === 1 ? record.id2 : record.id1;
+  var empty = { ok: false, transient: false, retry: false, message: '', targetName: '' };
+  if (!isFileId(targetId)) {
+    empty.message = 'That copy is already in Trash, but this row has no file id to check. The other file was not trashed.';
+    return empty;
+  }
+  var target;
+  try {
+    target = readLiveFile(targetId);
+  } catch (err) {
+    if (isTransientError(err)) {
+      empty.transient = true;
+      empty.message = err && err.message ? err.message : String(err);
+      return empty;
+    }
+    empty.message = 'Check Drive Trash. The chosen file looked trashed, but Drive could not be read again. The other file was not trashed. File id: ' + targetId;
+    return empty;
+  }
+  if (target.trashed === false) {
+    // Drive says it left Trash. The next pass uses the normal checks. No Issue.
+    empty.retry = true;
+    return empty;
+  }
+  if (target.trashed !== true) {
+    empty.message = 'Check Drive Trash. The chosen file looked trashed, but Drive did not confirm that on the second read. The other file was not trashed. File id: ' + targetId;
+    return empty;
+  }
+  if (!sameOwnedBytes(target, record.md5, record.sizeRaw, true)) {
+    empty.message = 'That copy is already in Trash, but it no longer matches the checksum and size from the scan, or you do not own it. It was not restored, and the other file was not trashed.';
+    return empty;
+  }
+  var cache = Object.create(null);
+  cache[targetId] = target;
+  var sibling = null;
+  try {
+    sibling = findLiveSibling(record, targetId, partnerId, cache);
+  } catch (err) {
+    if (isTransientError(err)) {
+      empty.transient = true;
+      empty.message = err && err.message ? err.message : String(err);
+      return empty;
+    }
+    empty.message = 'Check Drive Trash. The chosen file is already in Trash, and the spare copy could not be read. It was not restored, and the other file was not trashed. File id: ' + targetId;
+    return empty;
+  }
+  if (!sibling || sibling.id === targetId) {
+    empty.message = 'That copy is already in Trash. No other copy you own is still in Drive with the same size and MD5. It was not restored, and the other file was not trashed.';
+    return empty;
+  }
+  try {
+    var siblingNow = readLiveFile(sibling.id);
+    if (!siblingNow || siblingNow.id === targetId || !sameOwnedBytes(siblingNow, record.md5, record.sizeRaw)) {
+      empty.message = 'That copy is already in Trash. The other copy changed at the last moment. It was not restored, and the other file was not trashed.';
+      return empty;
+    }
+  } catch (err2) {
+    if (isTransientError(err2)) {
+      empty.transient = true;
+      empty.message = err2 && err2.message ? err2.message : String(err2);
+      return empty;
+    }
+    empty.message = 'Check Drive Trash. The chosen file is already in Trash, and the spare copy could not be read. It was not restored, and the other file was not trashed. File id: ' + targetId;
+    return empty;
+  }
+  empty.ok = true;
+  empty.targetName = String(target.name || '');
+  return empty;
 }
 
 function indexedIdsForChecksum(md5, sizeRaw) {
@@ -2959,8 +3291,8 @@ function rollbackTrash(fileId, plan) {
 }
 
 /**
- * The only function that moves a file to Trash.
- * Single-use server-side token. Re-checks ownership, checksum, size, and a surviving copy.
+ * One-row dialog path. Re-checks ownership, checksum, size, and a surviving copy.
+ * Delete all selected actions performs the same checks in prepareOwnedTrash, with no dialog.
  */
 function trashFromDialog(nonce) {
   if (!/^[0-9a-f-]{36}$/i.test(String(nonce || ''))) throw new Error('Bad confirmation. Nothing was deleted.');
@@ -3026,7 +3358,6 @@ function trashFromDialog(nonce) {
     // A refusal before this line leaves the other button usable. The document
     // lock is held, so the other button cannot pass the same checks in parallel.
     deletePlansForPair(plan.pairKey);
-    // Sole trash mutation in this project.
     try {
       DriveApp.getFileById(plan.targetId).setTrashed(true);
     } catch (err) {
@@ -3130,11 +3461,18 @@ function noteTrashed(id1, id2, targetId, name) {
     }
     if (a === targetId || b === targetId) {
       var which = a === targetId ? 'File 1' : 'File 2';
-      sheet.getRange(i + 2, DUP_RESULT).setValue(sheetText(which + ' is already in Trash from another row. It was not permanently deleted. A later Trash on this row still requires a surviving identical copy.'));
+      sheet.getRange(i + 2, DUP_RESULT).setValue(sheetText(which + ' is already in Trash from another row. It was not permanently deleted. A later delete still requires a surviving identical copy.'));
     }
   }
   if (match < 0) return;
-  archiveDeletedRow(sheet, match + 2, String(ids[match][0] || ''), targetId, name);
+  archiveDeletedRow(
+    sheet,
+    match + 2,
+    String(ids[match][0] == null ? '' : ids[match][0]),
+    String(ids[match][1] == null ? '' : ids[match][1]),
+    targetId,
+    name
+  );
 }
 
 function ensureDeletedSheet() {
@@ -3164,38 +3502,756 @@ function ensureDeletedSheet() {
   return sheet;
 }
 
-function archiveDeletedRow(sheet, row, id1, targetId, name) {
-  var which = id1 === targetId ? 'File 1' : 'File 2';
+function removeSheetFilter(sheet) {
+  try {
+    var filter = sheet.getFilter();
+    if (filter) filter.remove();
+  } catch (ignore) {}
+}
+
+function restoreDupFilter(sheet, end) {
+  try {
+    var filter = sheet.getFilter();
+    if (filter) filter.remove();
+    if (end >= 2) sheet.getRange(1, 1, end, DUP_MD5).createFilter();
+  } catch (ignore) {}
+}
+
+function reprotectDupIds(sheet, end) {
+  if (end < 2) return;
+  protectRange(sheet.getRange(2, DUP_ID1, end - 1, 3));
+  protectRange(sheet.getRange(2, DUP_PAIR, end - 1, 1));
+  try {
+    if (sheet.getMaxColumns() >= DUP_PAIR) {
+      sheet.hideColumns(DUP_ID1, 3);
+      sheet.hideColumns(DUP_PAIR, 1);
+    }
+  } catch (ignore) {}
+}
+
+/** Reprotects through the updated report end. Does not recreate the filter. */
+function restoreDupSheetAfterDelete(sheet, reportEnd, removed) {
+  var end = reportEnd;
+  try {
+    if (removed > 0) end = rememberDupEnd(sheet, removed);
+  } catch (ignore) {}
+  try {
+    if (end >= 2) reprotectDupIds(sheet, end);
+  } catch (ignore) {}
+  return end;
+}
+
+/**
+ * Rows whose Action is Delete file 1 or Delete file 2.
+ * A row that already has Issue text is left out unless includeDiagnosed is set,
+ * so a continuation does not retry a row that was already skipped.
+ */
+function listSelectedActionRows(sheet, last, includeDiagnosed) {
+  var pending = [];
+  if (last < 2) return pending;
+  var hasIssue = !includeDiagnosed && sheet.getMaxColumns() >= DUP_ISSUE;
+  var row = 2;
+  while (row <= last) {
+    var count = Math.min(1000, last - row + 1);
+    var actionValues = sheet.getRange(row, DUP_ACTION, count, 1).getValues();
+    var issues = hasIssue ? sheet.getRange(row, DUP_ISSUE, count, 1).getValues() : null;
+    for (var i = 0; i < actionValues.length; i++) {
+      if (!chosenDeleteSide(actionValues[i][0])) continue;
+      if (issues && issueTextPresent(issues[i][0])) continue;
+      pending.push(row + i);
+    }
+    row += count;
+  }
+  return pending;
+}
+
+function countSelectedActions(sheet) {
+  return listSelectedActionRows(sheet, duplicateRowCount(), false).length;
+}
+
+/** id1|id2 to row numbers, rows 2..reportEnd only. Ids are not trimmed. */
+function readDupIdMap(sheet, reportEnd) {
+  var map = Object.create(null);
+  if (reportEnd < 2) return map;
+  var row = 2;
+  while (row <= reportEnd) {
+    var count = Math.min(1000, reportEnd - row + 1);
+    var ids = sheet.getRange(row, DUP_ID1, count, 2).getValues();
+    for (var i = 0; i < ids.length; i++) {
+      var id1 = String(ids[i][0] == null ? '' : ids[i][0]);
+      var id2 = String(ids[i][1] == null ? '' : ids[i][1]);
+      var key = id1 + '|' + id2;
+      if (!map[key]) map[key] = [];
+      map[key].push(row + i);
+    }
+    row += count;
+  }
+  return map;
+}
+
+/**
+ * Deletes report rows whose ids still match the files just trashed.
+ * which 0 ignores the Action cell. which 1 or 2 leaves the row when the
+ * dropdown was switched to the other file after Trash.
+ * @return {{removed:number, blocked:boolean, message:string}}
+ */
+function deleteMatchedDupRows(sheet, doneRows, reportEnd) {
+  var map = readDupIdMap(sheet, reportEnd);
+  var jobs = [];
+  for (var d = 0; d < doneRows.length; d++) {
+    var item = doneRows[d];
+    var id1 = String(item.id1 == null ? '' : item.id1);
+    var id2 = String(item.id2 == null ? '' : item.id2);
+    var rows = map[id1 + '|' + id2];
+    if (!rows || !rows.length) continue;
+    var which = item.which === 1 || item.which === 2 ? item.which : 0;
+    jobs.push({ row: rows.pop(), id1: id1, id2: id2, which: which });
+  }
+  jobs.sort(function (a, b) { return b.row - a.row; });
+  var removed = 0;
+  for (var j = 0; j < jobs.length; j++) {
+    var job = jobs[j];
+    try {
+      if (job.row < 2 || job.row > sheet.getLastRow()) continue;
+      var current = sheet.getRange(job.row, DUP_ID1, 1, 2).getValues()[0];
+      var now1 = String(current[0] == null ? '' : current[0]);
+      var now2 = String(current[1] == null ? '' : current[1]);
+      if (now1 !== job.id1 || now2 !== job.id2) continue;
+      if (job.which === 1 || job.which === 2) {
+        var choice = chosenDeleteSide(sheet.getRange(job.row, DUP_ACTION).getValue());
+        if (choice && choice !== job.which) continue;
+      }
+      sheet.deleteRow(job.row);
+      removed++;
+    } catch (err) {
+      var stillThere = false;
+      try { stillThere = job.row >= 2 && job.row <= sheet.getLastRow(); } catch (ignore) {}
+      if (!stillThere) continue;
+      var cleared = false;
+      try {
+        var stuck = sheet.getRange(job.row, DUP_ID1, 1, 2).getValues()[0];
+        var stuck1 = String(stuck[0] == null ? '' : stuck[0]);
+        var stuck2 = String(stuck[1] == null ? '' : stuck[1]);
+        // deleteRow can throw after the row is already gone, and the next row
+        // then sits at this position. Do not clear that row's Action.
+        if (stuck1 !== job.id1 || stuck2 !== job.id2) continue;
+        sheet.getRange(job.row, DUP_RESULT).setValue(sheetText(
+          'The file is in Trash, but this row could not be removed (' +
+            (err && err.message ? err.message : err) + '). It was not permanently deleted.'
+        ));
+        cleared = true;
+        try { sheet.getRange(job.row, DUP_ACTION).clearContent(); } catch (ignoreClear) {}
+      } catch (ignore) {}
+      // This row is noted. Keep removing the other rows in the batch.
+      // Stop only when the sheet cannot record that this row is stuck.
+      if (!cleared) {
+        return {
+          removed: removed,
+          blocked: true,
+          message: err && err.message ? err.message : String(err)
+        };
+      }
+    }
+  }
+  return { removed: removed, blocked: false, message: '' };
+}
+
+function clearSelectedDeleteProgress() {
+  var store = props();
+  try { store.deleteProperty('SEL_OPEN'); } catch (ignore) {}
+  try { store.deleteProperty('SEL_TRASHED'); } catch (ignore) {}
+  try { store.deleteProperty('SEL_FAILED'); } catch (ignore) {}
+}
+
+function addSelectedDeleteTotals(trashed, failed) {
+  var store = props();
+  var totalTrashed = Number(store.getProperty('SEL_TRASHED') || '0');
+  var totalFailed = Number(store.getProperty('SEL_FAILED') || '0');
+  if (!isFinite(totalTrashed) || totalTrashed < 0) totalTrashed = 0;
+  if (!isFinite(totalFailed) || totalFailed < 0) totalFailed = 0;
+  totalTrashed += Number(trashed) || 0;
+  totalFailed += Number(failed) || 0;
+  store.setProperty('SEL_TRASHED', String(totalTrashed));
+  store.setProperty('SEL_FAILED', String(totalFailed));
+  return { trashed: totalTrashed, failed: totalFailed };
+}
+
+function dupRowIdsMatch(sheet, row, id1, id2) {
+  if (row < 2 || row > sheet.getLastRow()) return false;
+  var current = sheet.getRange(row, DUP_ID1, 1, 2).getValues()[0];
+  return String(current[0] == null ? '' : current[0]) === id1 &&
+    String(current[1] == null ? '' : current[1]) === id2;
+}
+
+function archiveDeletedRow(sheet, row, id1, id2, targetId, name) {
+  var pair1 = String(id1 == null ? '' : id1);
+  var pair2 = String(id2 == null ? '' : id2);
+  var which = pair1 === String(targetId) ? 'File 1' : 'File 2';
   var deletedNote = which + ' was moved to Trash, not permanently deleted: ' + (name || targetId) + '. The other file on this row was left in Drive.';
+  var reportEnd = duplicateRowCount();
+  var sourceRow = dupRowIdsMatch(sheet, row, pair1, pair2) ? row : 0;
+  if (!sourceRow) {
+    var found = readDupIdMap(sheet, reportEnd)[pair1 + '|' + pair2];
+    if (found && found.length) sourceRow = found[found.length - 1];
+  }
+  if (sourceRow && dupRowIdsMatch(sheet, sourceRow, pair1, pair2)) {
+    var values = sheet.getRange(sourceRow, 1, 1, DUP_COLS).getValues()[0];
+    var rich1 = null;
+    var rich2 = null;
+    try {
+      var rich = sheet.getRange(sourceRow, 1, 1, 2).getRichTextValues();
+      rich1 = rich[0][0];
+      rich2 = rich[0][1];
+    } catch (ignore) {}
+    var dest = ensureDeletedSheet();
+    var destRow = Math.max(dest.getLastRow(), 1) + 1;
+    ensureGrid(dest, destRow, 1, DUP_COLS + 1);
+    var out = values.slice();
+    out[DUP_ACTION - 1] = '';
+    out.push(sheetText(deletedNote));
+    var range = dest.getRange(destRow, 1, 1, out.length);
+    range.setNumberFormat('@');
+    range.setValues([out]);
+    try {
+      if (rich1) dest.getRange(destRow, 1).setRichTextValue(rich1);
+      if (rich2) dest.getRange(destRow, 2).setRichTextValue(rich2);
+    } catch (ignore) {}
+  }
+  var removed = 0;
+  try {
+    clearOurProtections(sheet);
+    removeSheetFilter(sheet);
+    var outcome = deleteMatchedDupRows(sheet, [{ id1: pair1, id2: pair2, which: 0 }], reportEnd);
+    removed = outcome.removed;
+    if (outcome.blocked) throw new Error(outcome.message || 'The row could not be removed after Trash.');
+  } finally {
+    var end = restoreDupSheetAfterDelete(sheet, reportEnd, removed);
+    restoreDupFilter(sheet, end);
+  }
+}
+
+function clearSelectedDeleteTriggers() {
+  var triggers = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < triggers.length; i++) {
+    if (triggers[i].getHandlerFunction() === 'continueSelectedDeletes') ScriptApp.deleteTrigger(triggers[i]);
+  }
+}
+
+function scheduleSelectedDeletes() {
+  clearSelectedDeleteTriggers();
+  ScriptApp.newTrigger('continueSelectedDeletes').timeBased().after(60 * 1000).create();
+}
+
+/** Menu entry. Trashes every Duplicates row whose Action is already chosen. */
+function deleteSelectedActions() {
+  runSelectedDeletes(false);
+}
+
+/** Time-driven continuation. Same work, still with no dialog. */
+function continueSelectedDeletes() {
+  runSelectedDeletes(true);
+}
+
+function runSelectedDeletes(automatic) {
+  var lock = LockService.getDocumentLock();
+  if (!lock.tryLock(automatic ? 5000 : 20000)) {
+    if (!automatic) toast('Another action is running. Nothing was deleted.');
+    else {
+      try { scheduleSelectedDeletes(); } catch (ignore) {}
+    }
+    return;
+  }
+  beginRun();
+  var store = props();
+  try {
+    var scanning = activeScanPhase();
+    if (scanning) {
+      try { clearSelectedDeleteTriggers(); } catch (ignore) {}
+      var already = Number(store.getProperty('SEL_TRASHED') || '0');
+      if (!isFinite(already) || already < 0) already = 0;
+      clearSelectedDeleteProgress();
+      var busy = 'A scan is still running (' + scanning + '). Selected deletes did not run. Nothing new was deleted.';
+      if (already) busy += ' ' + already + ' file(s) are in Trash.';
+      try { writeStatusField('Selected deletes', busy); } catch (ignore) {}
+      toast(busy);
+      return;
+    }
+    if (!automatic && store.getProperty('SEL_OPEN') !== '1') {
+      store.setProperty('SEL_TRASHED', '0');
+      store.setProperty('SEL_FAILED', '0');
+    }
+    var result = trashSelectedActionsPass(!automatic);
+    var total = addSelectedDeleteTotals(result.trashed, result.failed);
+    if (result.fatal) {
+      try { clearSelectedDeleteTriggers(); } catch (ignore) {}
+      var stopped = 'Stopped: ' + result.fatal;
+      if (total.trashed) stopped += ' ' + total.trashed + ' file(s) are in Trash.';
+      if (result.remaining) stopped += ' ' + result.remaining + ' selected row(s) were left. Run Delete all selected actions again.';
+      clearSelectedDeleteProgress();
+      try { writeStatusField('Selected deletes', stopped); } catch (ignore) {}
+      toast(stopped);
+      return;
+    }
+    if (result.remaining > 0) {
+      try {
+        store.setProperty('SEL_OPEN', '1');
+        scheduleSelectedDeletes();
+        var pending = result.trashed + ' file(s) from this run are in Trash (' + total.trashed + ' so far). ';
+        if (result.failed) pending += result.failed + ' row(s) skipped. The reason is in red in the Issue column. ';
+        pending += result.remaining + ' selected row(s) left. Continuing with no dialog.';
+        writeStatusField('Selected deletes', pending);
+        toast(pending);
+      } catch (err) {
+        try { store.setProperty('SEL_OPEN', '1'); } catch (ignore) {}
+        var retry = total.trashed + ' file(s) are in Trash. ' + result.remaining +
+          ' selected row(s) left. Run Delete all selected actions again. ' + (err && err.message ? err.message : err);
+        try { writeStatusField('Selected deletes', retry); } catch (ignore2) {}
+        toast(result.trashed + ' file(s) from this run are in Trash. Run Delete all selected actions again for the rest.');
+      }
+    } else {
+      try { clearSelectedDeleteTriggers(); } catch (ignore) {}
+      var doneTrashed = total.trashed;
+      var doneFailed = total.failed;
+      clearSelectedDeleteProgress();
+      if (doneTrashed === 0 && doneFailed === 0) {
+        if (!automatic) toast('No Duplicates row has Delete file 1 or Delete file 2 selected. Nothing was deleted.');
+      } else {
+        var summary = doneTrashed + ' file(s) are in Trash.';
+        if (doneFailed) summary += ' ' + doneFailed + ' row(s) were skipped. The reason is in red in the Issue column. Run Delete all selected actions again to check those rows once more.';
+        writeStatusField('Selected deletes', summary);
+        toast(summary);
+      }
+    }
+  } catch (err) {
+    var message = err && err.message ? err.message : String(err);
+    try { writeStatusField('Selected deletes', 'Stopped: ' + message); } catch (ignore) {}
+    toast('Selected deletes stopped: ' + message);
+    if (isTransientError(err)) {
+      try {
+        store.setProperty('SEL_OPEN', '1');
+        scheduleSelectedDeletes();
+      } catch (ignore2) {}
+    } else {
+      try { clearSelectedDeleteTriggers(); } catch (ignore3) {}
+      clearSelectedDeleteProgress();
+    }
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/** Header, width, and note for the red Issue column. Does not protect or hide it. */
+function ensureIssueColumn(sheet) {
+  ensureGrid(sheet, 1, 1, DUP_ISSUE);
+  var header = sheet.getRange(1, DUP_ISSUE);
+  if (String(header.getValue() || '') !== 'Issue') header.setValue('Issue');
+  try {
+    header.setFontWeight('bold').setBackground('#f5f5f4').setFontColor('#000000');
+    header.setNote('Red text here is why Delete all selected actions skipped this row. Read it. A refused check leaves both files in Drive. Text that says to check Drive Trash means a file may already be there. The Action stays until the row is removed or you clear it. Run Delete all selected actions again to check the row once more. A continuation does not retry a row that already has this note.');
+    sheet.setColumnWidth(DUP_ISSUE, 420);
+  } catch (ignore) {}
+}
+
+/** Writes the skip reason in red at the end of the row. Does not trash and does not clear Action. */
+function noteSkippedRow(sheet, row, message) {
+  var text = bulkSkipMessage(message);
+  ensureIssueColumn(sheet);
+  var cell = sheet.getRange(row, DUP_ISSUE);
+  var existing = String(cell.getValue() || '');
+  // A soft "already in Trash" note must not hide a rollback that did not stick.
+  // A later note that itself says the file was not restored, or to check Trash, may replace it.
+  if (issueTextPresent(existing) &&
+      (existing.indexOf('putting the file back failed') !== -1 || existing.indexOf('Check Drive Trash') !== -1) &&
+      text.indexOf('already in Trash') !== -1 &&
+      text.indexOf('was not restored') === -1 &&
+      text.indexOf('Check Drive Trash') === -1) {
+    return;
+  }
+  cell.setNumberFormat('@');
+  cell.setValue(sheetText(text));
+  try {
+    cell.setFontColor('#ff0000');
+    cell.setWrap(true);
+  } catch (ignore) {}
+  try { sheet.getRange(row, DUP_RESULT).setValue(sheetText(text)); } catch (ignoreResult) {}
+}
+
+/**
+ * Writes the skip on the row that still holds this pair.
+ * Returns false when that pair is no longer on the report, so a moved row is not marked by mistake.
+ */
+function skipSelectedRow(sheet, row, id1, id2, message) {
+  var pair1 = String(id1 == null ? '' : id1);
+  var pair2 = String(id2 == null ? '' : id2);
+  var target = row;
+  if (!dupRowIdsMatch(sheet, target, pair1, pair2)) {
+    var found = readDupIdMap(sheet, duplicateRowCount())[pair1 + '|' + pair2];
+    target = found && found.length ? found[found.length - 1] : 0;
+  }
+  if (!target || !dupRowIdsMatch(sheet, target, pair1, pair2)) return false;
+  noteSkippedRow(sheet, target, message);
+  return true;
+}
+
+/**
+ * True when this row still asks for the same file, with the same ids, size, and MD5.
+ * A change aborts with no Issue, so the new choice is not blocked and is not trashed.
+ */
+function rowStillSelected(sheet, row, decision, md5, sizeRaw, spreadsheetId) {
+  if (!decision || row < 2) return false;
+  if (row > sheet.getLastRow()) return false;
   var values = sheet.getRange(row, 1, 1, DUP_COLS).getValues()[0];
+  var again = selectedTrashTarget(
+    values[DUP_ACTION - 1],
+    values[DUP_ID1 - 1],
+    values[DUP_ID2 - 1],
+    values[DUP_PAIR - 1],
+    spreadsheetId
+  );
+  if (!again.ok || again.which !== decision.which || again.targetId !== decision.targetId) return false;
+  if (again.id1 !== decision.id1 || again.id2 !== decision.id2) return false;
+  var md5Now = String(values[DUP_MD5 - 1] == null ? '' : values[DUP_MD5 - 1]).trim().toLowerCase();
+  var sizeNow = normSize(values[DUP_SIZE - 1]);
+  return md5Now === String(md5 || '').toLowerCase() && sizeNow === normSize(sizeRaw);
+}
+
+/** Snapshot of a row whose chosen file is in Trash. Clears Issue only when the ids still match. */
+function captureSelectedDone(sheet, row, values, decision, name, sizeRaw, md5, already) {
+  if (dupRowIdsMatch(sheet, row, decision.id1, decision.id2)) {
+    try {
+      var issueCell = sheet.getRange(row, DUP_ISSUE);
+      issueCell.clearContent();
+      issueCell.setFontColor('#000000');
+    } catch (ignoreClear) {}
+  }
   var rich1 = null;
   var rich2 = null;
   try {
     var rich = sheet.getRange(row, 1, 1, 2).getRichTextValues();
     rich1 = rich[0][0];
     rich2 = rich[0][1];
+  } catch (ignoreRich) {}
+  var path = decision.which === 1 ? String(values[0] == null ? '' : values[0]) : String(values[1] == null ? '' : values[1]);
+  return {
+    values: values,
+    rich1: rich1,
+    rich2: rich2,
+    targetId: decision.targetId,
+    id1: decision.id1,
+    id2: decision.id2,
+    which: decision.which,
+    name: name || decision.targetId,
+    path: path,
+    sizeRaw: sizeRaw,
+    md5: md5,
+    already: already === true
+  };
+}
+
+/**
+ * Moves already-chosen files to Trash. No dialog and no confirmation.
+ * Each selected row is re-checked for ownership, checksum, size, and a spare copy.
+ * A failed check before Trash trashes neither file and writes the reason in red in Issue.
+ * A file that is already in Trash is recorded, not trashed again, when a spare copy remains.
+ * A transient Drive error stops this batch with no Issue, so a later run retries it.
+ * @param {boolean} recheckIssues When true, rows that already have Issue text are checked again.
+ * @return {{trashed:number, failed:number, remaining:number, fatal:string}}
+ */
+function trashSelectedActionsPass(recheckIssues) {
+  var sheet = getOrCreateSheet(SHEET_DUPLICATES);
+  var last = duplicateRowCount();
+  if (last < 2) return { trashed: 0, failed: 0, remaining: 0, fatal: '' };
+  try { ensureIssueColumn(sheet); } catch (ignore) {}
+  try {
+    sheet.getRange(1, DUP_ACTION).setNote(
+      'Delete file 1 or Delete file 2 records the choice. Duplicate review → Delete all selected actions checks Drive again with no dialog, then moves the chosen file to Trash. If a check fails before Trash, neither file is trashed and the reason is written in red in Issue. Nothing is permanently deleted.'
+    );
   } catch (ignore) {}
+  var pending = listSelectedActionRows(sheet, last, !!recheckIssues);
+  if (!pending.length) return { trashed: 0, failed: 0, remaining: 0, fatal: '' };
+
+  var spreadsheetId = '';
+  try { spreadsheetId = ss().getId(); } catch (ignore) {}
+
+  var done = [];
+  var failed = 0;
+  var loopError = null;
+  for (var p = 0; p < pending.length; p++) {
+    // Leave time for the spare re-read, a rollback, and the sheet update.
+    if (done.length >= SELECTED_DELETE_BATCH || overBudget(90000)) break;
+    try {
+      var row = pending[p];
+      if (row < 2 || row > sheet.getLastRow()) continue;
+      var values = sheet.getRange(row, 1, 1, DUP_COLS).getValues()[0];
+      var decision = selectedTrashTarget(
+        values[DUP_ACTION - 1],
+        values[DUP_ID1 - 1],
+        values[DUP_ID2 - 1],
+        values[DUP_PAIR - 1],
+        spreadsheetId
+      );
+      if (!decision.selected) continue;
+      if (!decision.ok) {
+        if (skipSelectedRow(sheet, row, decision.id1, decision.id2, decision.message)) failed++;
+        continue;
+      }
+      var md5 = String(values[DUP_MD5 - 1] == null ? '' : values[DUP_MD5 - 1]).trim().toLowerCase();
+      var sizeRaw = normSize(values[DUP_SIZE - 1]);
+      if (!isMd5(md5) || !sizeRaw || sizeRaw === '0') {
+        if (skipSelectedRow(sheet, row, decision.id1, decision.id2, 'This row has no checksum or size from the scan. Nothing was deleted.')) failed++;
+        continue;
+      }
+      var record = { id1: decision.id1, id2: decision.id2, md5: md5, sizeRaw: sizeRaw };
+      var ready = prepareOwnedTrash(record, decision.which, Object.create(null), true);
+      if (!ready.ok) {
+        if (ready.transient) break;
+        if (ready.alreadyTrashed) {
+          var recovered = confirmAlreadyTrashed(record, decision.which);
+          if (recovered.transient) break;
+          if (recovered.retry) continue;
+          if (!recovered.ok) {
+            // The choice may have changed during the Drive reads. Do not block the new choice with this row's old result.
+            if (rowStillSelected(sheet, row, decision, md5, sizeRaw, spreadsheetId) &&
+                skipSelectedRow(sheet, row, decision.id1, decision.id2, recovered.message)) failed++;
+            continue;
+          }
+          if (!rowStillSelected(sheet, row, decision, md5, sizeRaw, spreadsheetId)) continue;
+          done.push(captureSelectedDone(sheet, row, values, decision, recovered.targetName || ready.targetName, sizeRaw, md5, true));
+          continue;
+        }
+        if (rowStillSelected(sheet, row, decision, md5, sizeRaw, spreadsheetId) &&
+            skipSelectedRow(sheet, row, decision.id1, decision.id2, ready.message)) failed++;
+        continue;
+      }
+      // The checks above can take a while. Do not trash a choice the user has since changed.
+      if (!rowStillSelected(sheet, row, decision, md5, sizeRaw, spreadsheetId)) continue;
+      var name = ready.targetName || '';
+      try {
+        var file = DriveApp.getFileById(decision.targetId);
+        try { name = file.getName() || name; } catch (ignoreName) {}
+        file.setTrashed(true);
+      } catch (err) {
+        var trashedNow = false;
+        try {
+          var again = DriveApp.getFileById(decision.targetId);
+          trashedNow = again.isTrashed() === true;
+          if (trashedNow && !name) {
+            try { name = again.getName() || ''; } catch (ignoreName2) {}
+          }
+        } catch (ignoreAgain) {}
+        if (!trashedNow) {
+          if (isTransientError(err)) break;
+          if (skipSelectedRow(sheet, row, decision.id1, decision.id2, 'Could not move to Trash. ' + (err && err.message ? err.message : err))) failed++;
+          continue;
+        }
+      }
+      var siblingAfter = null;
+      try { siblingAfter = readLiveFile(ready.siblingId); } catch (ignoreSibling) {}
+      if (!sameOwnedBytes(siblingAfter, md5, sizeRaw)) {
+        try {
+          rollbackTrash(decision.targetId, { md5: md5, sizeRaw: sizeRaw, targetId: decision.targetId });
+        } catch (rollbackErr) {
+          // A quota error while confirming the put-back is not a final answer.
+          // The next pass reads the file again and either finishes the row or skips it.
+          if (isTransientError(rollbackErr)) break;
+          if (skipSelectedRow(sheet, row, decision.id1, decision.id2, rollbackErr && rollbackErr.message ? rollbackErr.message : String(rollbackErr))) failed++;
+          continue;
+        }
+        if (skipSelectedRow(sheet, row, decision.id1, decision.id2, 'The other copy disappeared during Trash. The chosen file was put back. Nothing was left in Trash.')) failed++;
+        continue;
+      }
+      var after = null;
+      var afterError = null;
+      try {
+        after = readLiveFile(decision.targetId);
+      } catch (readErr) {
+        afterError = readErr;
+      }
+      if (!after || after.trashed !== true) {
+        // Quota while re-reading a file we already trashed, after the spare
+        // copy was confirmed, is not a final answer. Clear a stale Issue so
+        // the continuation can record the row. A missing trashed field is not
+        // this case: that read succeeded and must not be retried forever.
+        if (!after && afterError && isTransientError(afterError)) {
+          try {
+            if (dupRowIdsMatch(sheet, row, decision.id1, decision.id2)) {
+              var pendingIssue = sheet.getRange(row, DUP_ISSUE);
+              pendingIssue.clearContent();
+              pendingIssue.setFontColor('#000000');
+            }
+          } catch (ignoreIssue) {}
+          break;
+        }
+        // A missing field is not proof the file stayed in Drive.
+        if (!after || after.trashed !== false) {
+          try {
+            logEmergency(decision.targetId, { md5: md5, sizeRaw: sizeRaw }, 'Trash was requested but the file could not be re-read. ' + (afterError && afterError.message ? afterError.message : afterError || ''));
+          } catch (ignoreLog) {}
+          if (skipSelectedRow(sheet, row, decision.id1, decision.id2, 'Check Drive Trash. Trash was requested for the chosen file, but Drive could not be re-read afterward. The other file was not trashed. File id: ' + decision.targetId)) failed++;
+        } else if (skipSelectedRow(sheet, row, decision.id1, decision.id2, 'Drive did not confirm the file is in Trash. Nothing was left in Trash by this row. File id: ' + decision.targetId)) {
+          failed++;
+        }
+        continue;
+      }
+      done.push(captureSelectedDone(sheet, row, values, decision, name, sizeRaw, md5, false));
+    } catch (err) {
+      loopError = err;
+      break;
+    }
+  }
+
+  if (done.length) {
+    try {
+      archiveSelectedDeletes(sheet, done);
+    } catch (err) {
+      try {
+        writeStatusField('Selected deletes', 'Files are in Trash. The sheet could not be fully updated: ' + (err && err.message ? err.message : err));
+      } catch (ignore) {}
+      if (!isTransientError(err)) loopError = err;
+    }
+  }
+  var fatal = '';
+  if (loopError && !isTransientError(loopError)) fatal = loopError.message ? loopError.message : String(loopError);
+  return { trashed: done.length, failed: failed, remaining: countSelectedActions(sheet), fatal: fatal };
+}
+
+function archiveSelectedDeletes(sheet, doneRows) {
+  if (!doneRows.length) return;
+  appendDeletedBatch(doneRows);
+  try {
+    appendTrashLogBatch(doneRows);
+  } catch (err) {
+    try { writeStatusField('Selected deletes', 'Files were trashed. The Trash log could not be written: ' + (err && err.message ? err.message : err)); } catch (ignore) {}
+  }
+  var reportEnd = duplicateRowCount();
+  var removed = 0;
+  var blockedMessage = '';
+  try {
+    clearOurProtections(sheet);
+    removeSheetFilter(sheet);
+    var outcome = deleteMatchedDupRows(sheet, doneRows, reportEnd);
+    removed = outcome.removed;
+    if (outcome.blocked) blockedMessage = outcome.message || 'A Duplicates row could not be removed after Trash.';
+  } finally {
+    var end = restoreDupSheetAfterDelete(sheet, reportEnd, removed);
+    if (end >= 2) {
+      try { markPartnersAlreadyTrashed(sheet, doneRows, end); } catch (ignore) {}
+    }
+    restoreDupFilter(sheet, end);
+  }
+  if (blockedMessage) throw new Error('Files are in Trash. ' + blockedMessage);
+}
+
+function appendDeletedBatch(doneRows) {
+  if (!doneRows.length) return;
   var dest = ensureDeletedSheet();
   var destRow = Math.max(dest.getLastRow(), 1) + 1;
-  ensureGrid(dest, destRow, 1, DUP_COLS + 1);
-  var out = values.slice();
-  out[DUP_ACTION - 1] = '';
-  out.push(sheetText(deletedNote));
-  var range = dest.getRange(destRow, 1, 1, out.length);
-  range.setNumberFormat('@');
-  range.setValues([out]);
-  try {
-    if (rich1) dest.getRange(destRow, 1).setRichTextValue(rich1);
-    if (rich2) dest.getRange(destRow, 2).setRichTextValue(rich2);
-  } catch (ignore) {}
-  clearOurProtections(sheet);
-  sheet.deleteRow(row);
-  var remaining = sheet.getLastRow();
-  if (remaining >= 2) {
-    protectRange(sheet.getRange(2, DUP_ID1, remaining - 1, 3));
-    protectRange(sheet.getRange(2, DUP_PAIR, remaining - 1, 1));
+  ensureGrid(dest, destRow, doneRows.length, DUP_COLS + 1);
+  var block = [];
+  for (var i = 0; i < doneRows.length; i++) {
+    var item = doneRows[i];
+    var which = item.which === 1 ? 'File 1' : 'File 2';
+    var note = item.already
+      ? which + ' was already in Trash, not permanently deleted: ' + (item.name || item.targetId) + '. Another identical copy was still in Drive, so this row was removed. The other file on this row was not trashed.'
+      : which + ' was moved to Trash, not permanently deleted: ' + (item.name || item.targetId) + '.';
+    var out = item.values.slice();
+    out[DUP_ACTION - 1] = '';
+    out.push(sheetText(note));
+    block.push(out);
   }
-  props().setProperty('DUP_ROWS', String(Math.max(remaining, 1)));
+  var range = dest.getRange(destRow, 1, block.length, DUP_COLS + 1);
+  range.setNumberFormat('@');
+  range.setValues(block);
+  for (var j = 0; j < doneRows.length; j++) {
+    try {
+      if (doneRows[j].rich1) dest.getRange(destRow + j, 1).setRichTextValue(doneRows[j].rich1);
+      if (doneRows[j].rich2) dest.getRange(destRow + j, 2).setRichTextValue(doneRows[j].rich2);
+    } catch (ignore) {}
+  }
+}
+
+function appendTrashLogBatch(doneRows) {
+  if (!doneRows.length) return;
+  var sheet = ensureLogHeader();
+  var start = Math.max(sheet.getLastRow(), 1) + 1;
+  ensureGrid(sheet, start, doneRows.length, 9);
+  var values = [];
+  for (var i = 0; i < doneRows.length; i++) {
+    var item = doneRows[i];
+    values.push([
+      new Date().toISOString(),
+      item.already
+        ? 'Already in Trash when Duplicate review ' + SCRIPT_VERSION + ' recorded it (selected actions). Not permanently deleted.'
+        : 'Moved to Trash by Duplicate review ' + SCRIPT_VERSION + ' (selected actions). Not permanently deleted.',
+      sheetText(item.name),
+      sheetText(unwrapSheetText(item.path)),
+      item.sizeRaw,
+      sheetExact(item.md5),
+      sheetExact(item.targetId),
+      'In Trash',
+      ''
+    ]);
+  }
+  var range = sheet.getRange(start, 1, values.length, 9);
+  range.setNumberFormat('@');
+  range.setValues(values);
+  var rule = SpreadsheetApp.newDataValidation().requireValueInList(['Restore this file'], true).setAllowInvalid(false).build();
+  sheet.getRange(start, 9, values.length, 1).setDataValidation(rule);
+  for (var r = 0; r < doneRows.length; r++) {
+    if (!isFileId(doneRows[r].targetId)) continue;
+    try {
+      var rich = SpreadsheetApp.newRichTextValue()
+        .setText(String(doneRows[r].name || doneRows[r].targetId))
+        .setLinkUrl(driveOpenUrl(doneRows[r].targetId))
+        .build();
+      sheet.getRange(start + r, 3).setRichTextValue(rich);
+    } catch (ignore) {}
+  }
+}
+
+function markPartnersAlreadyTrashed(sheet, doneRows, reportEnd) {
+  var names = Object.create(null);
+  for (var i = 0; i < doneRows.length; i++) {
+    var id = doneRows[i].targetId;
+    if (!id) continue;
+    names[id] = cleanDisplay(doneRows[i].name || id, 200);
+  }
+  if (reportEnd < 2) return;
+  var row = 2;
+  while (row <= reportEnd) {
+    var count = Math.min(500, reportEnd - row + 1);
+    var ids = sheet.getRange(row, DUP_ID1, count, 2).getValues();
+    var results = sheet.getRange(row, DUP_RESULT, count, 1).getValues();
+    var notes = [];
+    var any = false;
+    for (var r = 0; r < ids.length; r++) {
+      var file1 = String(ids[r][0] == null ? '' : ids[r][0]);
+      var file2 = String(ids[r][1] == null ? '' : ids[r][1]);
+      var hit1 = Object.prototype.hasOwnProperty.call(names, file1);
+      var hit2 = Object.prototype.hasOwnProperty.call(names, file2);
+      var note = partnerTrashNote(hit1, hit2, hit1 ? names[file1] : '', hit2 ? names[file2] : '', results[r][0]);
+      var plain = String(results[r][0] == null ? '' : results[r][0]).replace(/^\u200B/, '');
+      if (note === plain) note = '';
+      notes.push(note);
+      if (note) any = true;
+    }
+    if (any) writePartnerNoteRuns(sheet, row, notes);
+    row += count;
+  }
+}
+
+function writePartnerNoteRuns(sheet, startRow, notes) {
+  var start = -1;
+  for (var n = 0; n <= notes.length; n++) {
+    var has = n < notes.length && notes[n];
+    if (has && start < 0) start = n;
+    if (!has && start >= 0) {
+      var block = [];
+      for (var k = start; k < n; k++) block.push([sheetText(notes[k])]);
+      sheet.getRange(startRow + start, DUP_RESULT, block.length, 1).setValues(block);
+      start = -1;
+    }
+  }
 }
 
 function openRestoreForRow(row) {
@@ -3283,6 +4339,13 @@ if (typeof module !== 'undefined' && module.exports) {
     normSize: normSize,
     formatBytes: formatBytes,
     isFileId: isFileId,
+    chosenDeleteSide: chosenDeleteSide,
+    selectedTrashTarget: selectedTrashTarget,
+    nextDupEnd: nextDupEnd,
+    partnerTrashNote: partnerTrashNote,
+    bulkSkipMessage: bulkSkipMessage,
+    issueTextPresent: issueTextPresent,
+    sameOwnedBytes: sameOwnedBytes,
     pushMember: pushMember,
     emptyPending: emptyPending,
     finishPending: finishPending,
